@@ -18,8 +18,11 @@
  *                                                                             *
  *******************************************************************************/
 
-package com.github.shadowsocks.utils
+package com.github.shadowsocks.net
 
+import com.github.shadowsocks.utils.readableMessage
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.io.IOException
 
@@ -55,8 +58,8 @@ object TcpFastOpen {
             ProcessBuilder("su", "-c", "echo 3 > $PATH").redirectErrorStream(true).start()
                     .inputStream.bufferedReader().readText()
         } catch (e: IOException) {
-            e.localizedMessage
+            e.readableMessage
         }
     }
-    fun enableAsync() = thread("TcpFastOpen") { enable() }.join(1000)
+    fun enableTimeout() = runBlocking { withTimeoutOrNull(1000) { enable() } }
 }

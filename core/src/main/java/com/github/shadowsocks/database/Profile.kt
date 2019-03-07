@@ -21,8 +21,10 @@
 package com.github.shadowsocks.database
 
 import android.net.Uri
+import android.os.Parcelable
 import android.util.Base64
 import android.util.Log
+import android.util.LongSparseArray
 import androidx.core.net.toUri
 import androidx.room.*
 import com.github.shadowsocks.plugin.PluginConfiguration
@@ -31,6 +33,7 @@ import com.github.shadowsocks.preference.DataStore
 import com.github.shadowsocks.utils.Key
 import com.github.shadowsocks.utils.asIterable
 import com.github.shadowsocks.utils.parsePort
+import kotlinx.android.parcel.Parcelize
 import org.json.JSONArray
 import org.json.JSONObject
 import org.json.JSONTokener
@@ -40,7 +43,31 @@ import java.net.URISyntaxException
 import java.util.*
 
 @Entity
-class Profile : Serializable {
+@Parcelize
+data class Profile(
+        @PrimaryKey(autoGenerate = true)
+        var id: Long = 0,
+        var name: String? = "",
+        var host: String = "198.199.101.152",
+        var remotePort: Int = 8388,
+        var password: String = "u1rRWTssNv0p",
+        var method: String = "aes-256-cfb",
+        var route: String = "all",
+        var remoteDns: String = "8.8.8.8",
+        var proxyApps: Boolean = false,
+        var bypass: Boolean = false,
+        var udpdns: Boolean = false,
+        var ipv6: Boolean = true,
+        var individual: String = "",
+        var tx: Long = 0,
+        var rx: Long = 0,
+        var userOrder: Long = 0,
+        var plugin: String? = null,
+        var udpFallback: Long? = null,
+
+        @Ignore // not persisted in db, only used by direct boot
+        var dirty: Boolean = false
+) : Parcelable, Serializable {
     companion object {
         private const val TAG = "ShadowParser"
         private const val serialVersionUID = 0L
@@ -102,16 +129,18 @@ class Profile : Serializable {
         }.filterNotNull()
 
         private class JsonParser(private val feature: Profile? = null) : ArrayList<Profile>() {
-            private fun tryAdd(json: JSONObject) {
+            private val fallbackMap = mutableMapOf<Profile, Profile>()
+
+            private fun tryParse(json: JSONObject, fallback: Boolean = false): Profile? {
                 val host = json.optString("server")
-                if (host.isNullOrEmpty()) return
+                if (host.isNullOrEmpty()) return null
                 val remotePort = json.optInt("server_port")
-                if (remotePort <= 0) return
+                if (remotePort <= 0) return null
                 val password = json.optString("password")
-                if (password.isNullOrEmpty()) return
+                if (password.isNullOrEmpty()) return null
                 val method = json.optString("method")
-                if (method.isNullOrEmpty()) return
-                add(Profile().also {
+                if (method.isNullOrEmpty()) return null
+                return Profile().also {
                     it.host = host
                     it.remotePort = remotePort
                     it.password = password
@@ -124,6 +153,7 @@ class Profile : Serializable {
                     }
                     name = json.optString("remarks")
                     route = json.optString("route", route)
+                    if (fallback) return@apply
                     remoteDns = json.optString("remote_dns", remoteDns)
                     ipv6 = json.optBoolean("ipv6", ipv6)
                     json.optJSONObject("proxy_apps")?.also {
@@ -132,22 +162,41 @@ class Profile : Serializable {
                         individual = it.optJSONArray("android_list")?.asIterable()?.joinToString("\n") ?: individual
                     }
                     udpdns = json.optBoolean("udpdns", udpdns)
-                })
+                    json.optJSONObject("udp_fallback")?.let { tryParse(it, true) }?.also { fallbackMap[this] = it }
+                }
             }
 
             fun process(json: Any) {
                 when (json) {
                     is JSONObject -> {
-                        tryAdd(json)
-                        for (key in json.keys()) process(json.get(key))
+                        val profile = tryParse(json)
+                        if (profile != null) add(profile) else for (key in json.keys()) process(json.get(key))
                     }
                     is JSONArray -> json.asIterable().forEach(this::process)
                     // ignore other types
                 }
             }
+            fun finalize(create: (Profile) -> Unit) {
+                val profiles = ProfileManager.getAllProfiles() ?: emptyList()
+                for ((profile, fallback) in fallbackMap) {
+                    val match = profiles.firstOrNull {
+                        fallback.host == it.host && fallback.remotePort == it.remotePort &&
+                                fallback.password == it.password && fallback.method == it.method &&
+                                it.plugin.isNullOrEmpty()
+                    }
+                    profile.udpFallback = if (match == null) {
+                        create(fallback)
+                        fallback.id
+                    } else match.id
+                    ProfileManager.updateProfile(profile)
+                }
+            }
         }
-        fun parseJson(json: String, feature: Profile? = null): List<Profile> =
-                JsonParser(feature).apply { process(JSONTokener(json).nextValue()) }
+        fun parseJson(json: String, feature: Profile? = null, create: (Profile) -> Unit) = JsonParser(feature).run {
+            process(JSONTokener(json).nextValue())
+            for (profile in this) create(profile)
+            finalize(create)
+        }
     }
 
     @androidx.room.Dao
@@ -177,28 +226,6 @@ class Profile : Serializable {
         fun deleteAll(): Int
     }
 
-    @PrimaryKey(autoGenerate = true)
-    var id: Long = 0
-    var name: String? = ""
-    var host: String = "198.199.101.152"
-    var remotePort: Int = 8388
-    var password: String = "u1rRWTssNv0p"
-    var method: String = "aes-256-cfb"
-    var route: String = "all"
-    var remoteDns: String = "8.8.8.8"
-    var proxyApps: Boolean = false
-    var bypass: Boolean = false
-    var udpdns: Boolean = false
-    var ipv6: Boolean = true
-    var individual: String = ""
-    var tx: Long = 0
-    var rx: Long = 0
-    var userOrder: Long = 0
-    var plugin: String? = null
-
-    @Ignore // not persisted in db, only used by direct boot
-    var dirty: Boolean = false
-
     val formattedAddress get() = (if (host.contains(":")) "[%s]:%d" else "%s:%d").format(host, remotePort)
     val formattedName get() = if (name.isNullOrEmpty()) formattedAddress else name!!
 
@@ -215,7 +242,7 @@ class Profile : Serializable {
         val builder = Uri.Builder()
                 .scheme("ss")
                 .encodedAuthority("%s@%s:%d".format(Locale.ENGLISH,
-                        Base64.encodeToString("%s:%s".format(Locale.ENGLISH, method, password).toByteArray(),
+                        Base64.encodeToString("$method:$password".toByteArray(),
                                 Base64.NO_PADDING or Base64.NO_WRAP or Base64.URL_SAFE),
                         if (host.contains(':')) "[$host]" else host, remotePort))
         val configuration = PluginConfiguration(plugin ?: "")
@@ -226,12 +253,12 @@ class Profile : Serializable {
     }
     override fun toString() = toUri().toString()
 
-    fun toJson(compat: Boolean = false) = JSONObject().apply {
+    fun toJson(profiles: LongSparseArray<Profile>? = null): JSONObject = JSONObject().apply {
         put("server", host)
         put("server_port", remotePort)
         put("password", password)
         put("method", method)
-        if (compat) return@apply
+        if (profiles == null) return@apply
         PluginConfiguration(plugin ?: "").selectedOptions.also {
             if (it.id.isNotEmpty()) {
                 put("plugin", it.id)
@@ -251,9 +278,12 @@ class Profile : Serializable {
             }
         })
         put("udpdns", udpdns)
+        val fallback = profiles.get(udpFallback ?: return@apply)
+        if (fallback != null && fallback.plugin.isNullOrEmpty()) fallback.toJson().also { put("udp_fallback", it) }
     }
 
     fun serialize() {
+        DataStore.editingId = id
         DataStore.privateStore.putString(Key.name, name)
         DataStore.privateStore.putString(Key.host, host)
         DataStore.privateStore.putString(Key.remotePort, remotePort.toString())
@@ -267,9 +297,12 @@ class Profile : Serializable {
         DataStore.privateStore.putBoolean(Key.ipv6, ipv6)
         DataStore.individual = individual
         DataStore.plugin = plugin ?: ""
+        DataStore.udpFallback = udpFallback
         DataStore.privateStore.remove(Key.dirty)
     }
     fun deserialize() {
+        check(id == 0L || DataStore.editingId == id)
+        DataStore.editingId = null
         // It's assumed that default values are never used, so 0/false/null is always used even if that isn't the case
         name = DataStore.privateStore.getString(Key.name) ?: ""
         host = DataStore.privateStore.getString(Key.host) ?: ""
@@ -284,5 +317,6 @@ class Profile : Serializable {
         ipv6 = DataStore.privateStore.getBoolean(Key.ipv6, false)
         individual = DataStore.individual
         plugin = DataStore.plugin
+        udpFallback = DataStore.udpFallback
     }
 }

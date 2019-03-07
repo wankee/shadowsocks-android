@@ -35,10 +35,10 @@ import androidx.core.content.ContextCompat
 import androidx.core.content.getSystemService
 import com.github.shadowsocks.Core
 import com.github.shadowsocks.aidl.IShadowsocksServiceCallback
+import com.github.shadowsocks.aidl.TrafficStats
 import com.github.shadowsocks.core.R
 import com.github.shadowsocks.utils.Action
 import com.github.shadowsocks.utils.broadcastReceiver
-import java.util.*
 
 /**
  * Android < 8 VPN:     always invisible because of VPN notification/icon
@@ -53,13 +53,15 @@ class ServiceNotification(private val service: BaseService.Interface, profileNam
     private val callback: IShadowsocksServiceCallback by lazy {
         object : IShadowsocksServiceCallback.Stub() {
             override fun stateChanged(state: Int, profileName: String?, msg: String?) { }   // ignore
-            override fun trafficUpdated(profileId: Long, txRate: Long, rxRate: Long, txTotal: Long, rxTotal: Long) {
+            override fun trafficUpdated(profileId: Long, stats: TrafficStats) {
+                if (profileId != 0L) return
                 service as Context
-                val txr = service.getString(R.string.speed, Formatter.formatFileSize(service, txRate))
-                val rxr = service.getString(R.string.speed, Formatter.formatFileSize(service, rxRate))
+                val txr = service.getString(R.string.speed, Formatter.formatFileSize(service, stats.txRate))
+                val rxr = service.getString(R.string.speed, Formatter.formatFileSize(service, stats.rxRate))
                 builder.setContentText("$txr↑\t$rxr↓")
                 style.bigText(service.getString(R.string.stat_summary, txr, rxr,
-                        Formatter.formatFileSize(service, txTotal), Formatter.formatFileSize(service, rxTotal)))
+                        Formatter.formatFileSize(service, stats.txTotal),
+                        Formatter.formatFileSize(service, stats.rxTotal)))
                 show()
             }
             override fun trafficPersisted(profileId: Long) { }
@@ -84,15 +86,15 @@ class ServiceNotification(private val service: BaseService.Interface, profileNam
                 service.getString(R.string.stop), PendingIntent.getBroadcast(service, 0, Intent(Action.CLOSE), 0))
         update(if (service.getSystemService<PowerManager>()?.isInteractive != false)
             Intent.ACTION_SCREEN_ON else Intent.ACTION_SCREEN_OFF, true)
-        val screenFilter = IntentFilter()
-        screenFilter.addAction(Intent.ACTION_SCREEN_ON)
-        screenFilter.addAction(Intent.ACTION_SCREEN_OFF)
-        if (visible && Build.VERSION.SDK_INT < 26) screenFilter.addAction(Intent.ACTION_USER_PRESENT)
-        service.registerReceiver(lockReceiver, screenFilter)
+        service.registerReceiver(lockReceiver, IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_SCREEN_OFF)
+            if (visible && Build.VERSION.SDK_INT < 26) addAction(Intent.ACTION_USER_PRESENT)
+        })
     }
 
     private fun update(action: String?, forceShow: Boolean = false) {
-        if (forceShow || service.data.state == BaseService.CONNECTED) when (action) {
+        if (forceShow || service.data.state == BaseService.State.Connected) when (action) {
             Intent.ACTION_SCREEN_OFF -> {
                 setVisible(false, forceShow)
                 unregisterCallback()    // unregister callback to save battery
@@ -100,7 +102,7 @@ class ServiceNotification(private val service: BaseService.Interface, profileNam
             Intent.ACTION_SCREEN_ON -> {
                 setVisible(visible && !keyGuard.isKeyguardLocked, forceShow)
                 service.data.binder.registerCallback(callback)
-                service.data.binder.startListeningForBandwidth(callback)
+                service.data.binder.startListeningForBandwidth(callback, 1000)
                 callbackRegistered = true
             }
             Intent.ACTION_USER_PRESENT -> setVisible(true, forceShow)

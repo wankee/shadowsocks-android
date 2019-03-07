@@ -1,4 +1,12 @@
+* 1.2.0:
+  * New helper class `AlertDialogFragment` for creating `AlertDialog` that persists through configuration changes;
+  * Dependency update: `com.google.android.material:material:1.1.0-alpha03`.
+* 1.1.0:
+  * Having control characters in plugin options is no longer allowed.
+    If this breaks your plugin, you are doing it wrong.
+  * New helper method: `PluginOptions.putWithDefault`.
 * 1.0.0:
+  * BREAKING CHANGE: Plugins developed using this version and forward require shadowsocks-android 4.6.5 or higher.
   * `PathProvider` now takes `Int` instead of `String` for file modes;
   * Refactor to AndroidX;
   * No longer depends on preference libraries.

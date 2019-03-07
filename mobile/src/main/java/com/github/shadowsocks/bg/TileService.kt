@@ -23,55 +23,28 @@ package com.github.shadowsocks.bg
 import android.app.KeyguardManager
 import android.graphics.drawable.Icon
 import android.service.quicksettings.Tile
-import android.service.quicksettings.TileService as BaseTileService
 import androidx.annotation.RequiresApi
 import androidx.core.content.getSystemService
 import com.github.shadowsocks.Core
 import com.github.shadowsocks.R
-import com.github.shadowsocks.ShadowsocksConnection
 import com.github.shadowsocks.aidl.IShadowsocksService
-import com.github.shadowsocks.aidl.IShadowsocksServiceCallback
+import com.github.shadowsocks.aidl.ShadowsocksConnection
 import com.github.shadowsocks.preference.DataStore
+import android.service.quicksettings.TileService as BaseTileService
 
 @RequiresApi(24)
-class TileService : BaseTileService(), ShadowsocksConnection.Interface {
+class TileService : BaseTileService(), ShadowsocksConnection.Callback {
     private val iconIdle by lazy { Icon.createWithResource(this, R.drawable.ic_service_idle) }
     private val iconBusy by lazy { Icon.createWithResource(this, R.drawable.ic_service_busy) }
     private val iconConnected by lazy { Icon.createWithResource(this, R.drawable.ic_service_active) }
     private val keyguard by lazy { getSystemService<KeyguardManager>()!! }
     private var tapPending = false
 
-    override val serviceCallback: IShadowsocksServiceCallback.Stub by lazy {
-        @RequiresApi(24)
-        object : IShadowsocksServiceCallback.Stub() {
-            override fun stateChanged(state: Int, profileName: String?, msg: String?) {
-                val tile = qsTile ?: return
-                var label: String? = null
-                when (state) {
-                    BaseService.STOPPED -> {
-                        tile.icon = iconIdle
-                        tile.state = Tile.STATE_INACTIVE
-                    }
-                    BaseService.CONNECTED -> {
-                        tile.icon = iconConnected
-                        if (!keyguard.isDeviceLocked) label = profileName
-                        tile.state = Tile.STATE_ACTIVE
-                    }
-                    else -> {
-                        tile.icon = iconBusy
-                        tile.state = Tile.STATE_UNAVAILABLE
-                    }
-                }
-                tile.label = label ?: getString(R.string.app_name)
-                tile.updateTile()
-            }
-            override fun trafficUpdated(profileId: Long, txRate: Long, rxRate: Long, txTotal: Long, rxTotal: Long) { }
-            override fun trafficPersisted(profileId: Long) { }
-        }
-    }
-
+    private val connection = ShadowsocksConnection()
+    override fun stateChanged(state: BaseService.State, profileName: String?, msg: String?) =
+            updateTile(state) { profileName }
     override fun onServiceConnected(service: IShadowsocksService) {
-        serviceCallback.stateChanged(service.state, service.profileName, null)
+        updateTile(BaseService.State.values()[service.state]) { service.profileName }
         if (tapPending) {
             tapPending = false
             onClick()
@@ -80,10 +53,10 @@ class TileService : BaseTileService(), ShadowsocksConnection.Interface {
 
     override fun onStartListening() {
         super.onStartListening()
-        connection.connect()
+        connection.connect(this, this)
     }
     override fun onStopListening() {
-        connection.disconnect()
+        connection.disconnect(this)
         super.onStopListening()
     }
 
@@ -91,11 +64,41 @@ class TileService : BaseTileService(), ShadowsocksConnection.Interface {
         if (isLocked && !DataStore.canToggleLocked) unlockAndRun(this::toggle) else toggle()
     }
 
+    private fun updateTile(serviceState: BaseService.State, profileName: () -> String?) {
+        qsTile?.apply {
+            label = null
+            when (serviceState) {
+                BaseService.State.Idle -> throw IllegalStateException("serviceState")
+                BaseService.State.Connecting -> {
+                    icon = iconBusy
+                    state = Tile.STATE_ACTIVE
+                }
+                BaseService.State.Connected -> {
+                    icon = iconConnected
+                    if (!keyguard.isDeviceLocked) label = profileName()
+                    state = Tile.STATE_ACTIVE
+                }
+                BaseService.State.Stopping -> {
+                    icon = iconBusy
+                    state = Tile.STATE_UNAVAILABLE
+                }
+                BaseService.State.Stopped -> {
+                    icon = iconIdle
+                    state = Tile.STATE_INACTIVE
+                }
+            }
+            label = label ?: getString(R.string.app_name)
+            updateTile()
+        }
+    }
+
     private fun toggle() {
         val service = connection.service
-        if (service == null) tapPending = true else when (service.state) {
-            BaseService.STOPPED -> Core.startService()
-            BaseService.CONNECTED -> Core.stopService()
+        if (service == null) tapPending = true else BaseService.State.values()[service.state].let { state ->
+            when {
+                state.canStop -> Core.stopService()
+                state == BaseService.State.Stopped -> Core.startService()
+            }
         }
     }
 }

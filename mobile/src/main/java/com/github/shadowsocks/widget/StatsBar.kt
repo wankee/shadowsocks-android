@@ -33,7 +33,7 @@ import androidx.lifecycle.get
 import com.github.shadowsocks.MainActivity
 import com.github.shadowsocks.R
 import com.github.shadowsocks.bg.BaseService
-import com.github.shadowsocks.utils.HttpsTest
+import com.github.shadowsocks.net.HttpsTest
 import com.google.android.material.bottomappbar.BottomAppBar
 
 class StatsBar @JvmOverloads constructor(context: Context, attrs: AttributeSet? = null,
@@ -65,15 +65,15 @@ class StatsBar @JvmOverloads constructor(context: Context, attrs: AttributeSet? 
         super.setOnClickListener(l)
     }
 
-    fun changeState(state: Int) {
+    fun changeState(state: BaseService.State) {
         val activity = context as MainActivity
-        if (state != BaseService.CONNECTED) {
+        if (state != BaseService.State.Connected) {
             updateTraffic(0, 0, 0, 0)
             tester.status.removeObservers(activity)
-            if (state != BaseService.IDLE) tester.invalidate()
+            if (state != BaseService.State.Idle) tester.invalidate()
             statusText.setText(when (state) {
-                BaseService.CONNECTING -> R.string.connecting
-                BaseService.STOPPING -> R.string.stopping
+                BaseService.State.Connecting -> R.string.connecting
+                BaseService.State.Stopping -> R.string.stopping
                 else -> R.string.not_connected
             })
         } else {

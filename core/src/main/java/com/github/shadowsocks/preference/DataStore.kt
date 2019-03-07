@@ -25,10 +25,13 @@ import androidx.preference.PreferenceDataStore
 import com.github.shadowsocks.Core
 import com.github.shadowsocks.database.PrivateDatabase
 import com.github.shadowsocks.database.PublicDatabase
+import com.github.shadowsocks.net.TcpFastOpen
 import com.github.shadowsocks.utils.DirectBoot
 import com.github.shadowsocks.utils.Key
-import com.github.shadowsocks.utils.TcpFastOpen
 import com.github.shadowsocks.utils.parsePort
+import java.net.InetSocketAddress
+import java.net.NetworkInterface
+import java.net.SocketException
 
 object DataStore : OnPreferenceDataStoreChangeListener {
     val publicStore = RoomPreferenceDataStore(PublicDatabase.kvPairDao)
@@ -62,10 +65,31 @@ object DataStore : OnPreferenceDataStoreChangeListener {
     val directBootAware: Boolean get() = Core.directBootSupported && canToggleLocked
     val tcpFastOpen: Boolean get() = TcpFastOpen.sendEnabled && DataStore.publicStore.getBoolean(Key.tfo, true)
     val serviceMode get() = publicStore.getString(Key.serviceMode) ?: Key.modeVpn
-    val listenAddress get() = if (publicStore.getBoolean(Key.shareOverLan, false)) "0.0.0.0" else "127.0.0.1"
+
+    /**
+     * An alternative way to detect this interface could be checking MAC address = 00:ff:aa:00:00:55, but there is no
+     * reliable way of getting MAC address for now.
+     */
+    val hasArc0 by lazy {
+        var retry = 0
+        while (retry < 5) {
+            try {
+                return@lazy NetworkInterface.getByName("arc0") != null
+            } catch (_: SocketException) { }
+            retry++
+            Thread.sleep(100L shl retry)
+        }
+        false
+    }
+    /**
+     * Binding bogus IP address 100.115.92.2 in Chrome OS directly does not seem to work reliably. It might be due to
+     * the IP may not be available when the device is not connected to any network.
+     */
+    val listenAddress get() = if (publicStore.getBoolean(Key.shareOverLan, hasArc0)) "0.0.0.0" else "127.0.0.1"
     var portProxy: Int
         get() = getLocalPort(Key.portProxy, 1080)
         set(value) = publicStore.putString(Key.portProxy, value.toString())
+    val proxyAddress get() = InetSocketAddress("127.0.0.1", portProxy)
     var portLocalDns: Int
         get() = getLocalPort(Key.portLocalDns, 5450)
         set(value) = publicStore.putString(Key.portLocalDns, value.toString())
@@ -83,6 +107,9 @@ object DataStore : OnPreferenceDataStoreChangeListener {
         if (publicStore.getString(Key.portTransproxy) == null) portTransproxy = portTransproxy
     }
 
+    var editingId: Long?
+        get() = privateStore.getLong(Key.id)
+        set(value) = privateStore.putLong(Key.id, value)
     var proxyApps: Boolean
         get() = privateStore.getBoolean(Key.proxyApps) ?: false
         set(value) = privateStore.putBoolean(Key.proxyApps, value)
@@ -95,6 +122,9 @@ object DataStore : OnPreferenceDataStoreChangeListener {
     var plugin: String
         get() = privateStore.getString(Key.plugin) ?: ""
         set(value) = privateStore.putString(Key.plugin, value)
+    var udpFallback: Long?
+        get() = privateStore.getLong(Key.udpFallback)
+        set(value) = privateStore.putLong(Key.udpFallback, value)
     var dirty: Boolean
         get() = privateStore.getBoolean(Key.dirty) ?: false
         set(value) = privateStore.putBoolean(Key.dirty, value)

@@ -30,9 +30,14 @@ import androidx.core.content.pm.ShortcutInfoCompat
 import androidx.core.content.pm.ShortcutManagerCompat
 import androidx.core.graphics.drawable.IconCompat
 import com.github.shadowsocks.aidl.IShadowsocksService
+import com.github.shadowsocks.aidl.ShadowsocksConnection
 import com.github.shadowsocks.bg.BaseService
 
-class QuickToggleShortcut : Activity(), ShadowsocksConnection.Interface {
+@Suppress("DEPRECATION")
+@Deprecated("This shortcut is inefficient and should be superseded by TileService for API 24+.")
+class QuickToggleShortcut : Activity(), ShadowsocksConnection.Callback {
+    private val connection = ShadowsocksConnection()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         if (intent.action == Intent.ACTION_CREATE_SHORTCUT) {
@@ -44,21 +49,24 @@ class QuickToggleShortcut : Activity(), ShadowsocksConnection.Interface {
                             .build()))
             finish()
         } else {
-            connection.connect()
+            connection.connect(this, this)
             if (Build.VERSION.SDK_INT >= 25) getSystemService<ShortcutManager>()!!.reportShortcutUsed("toggle")
         }
     }
 
     override fun onServiceConnected(service: IShadowsocksService) {
-        when (service.state) {
-            BaseService.STOPPED -> Core.startService()
-            BaseService.CONNECTED -> Core.stopService()
+        val state = BaseService.State.values()[service.state]
+        when {
+            state.canStop -> Core.stopService()
+            state == BaseService.State.Stopped -> Core.startService()
         }
         finish()
     }
 
+    override fun stateChanged(state: BaseService.State, profileName: String?, msg: String?) { }
+
     override fun onDestroy() {
-        connection.disconnect()
+        connection.disconnect(this)
         super.onDestroy()
     }
 }

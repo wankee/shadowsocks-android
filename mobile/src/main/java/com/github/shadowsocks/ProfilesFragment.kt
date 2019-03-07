@@ -28,6 +28,7 @@ import android.nfc.NdefRecord
 import android.nfc.NfcAdapter
 import android.os.Bundle
 import android.text.format.Formatter
+import android.util.LongSparseArray
 import android.view.*
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -39,6 +40,7 @@ import androidx.core.content.getSystemService
 import androidx.core.os.bundleOf
 import androidx.fragment.app.DialogFragment
 import androidx.recyclerview.widget.*
+import com.github.shadowsocks.aidl.TrafficStats
 import com.github.shadowsocks.bg.BaseService
 import com.github.shadowsocks.database.Profile
 import com.github.shadowsocks.database.ProfileManager
@@ -47,12 +49,12 @@ import com.github.shadowsocks.preference.DataStore
 import com.github.shadowsocks.utils.Action
 import com.github.shadowsocks.utils.datas
 import com.github.shadowsocks.utils.printLog
+import com.github.shadowsocks.utils.readableMessage
 import com.github.shadowsocks.widget.UndoSnackbarManager
 import com.google.android.gms.ads.AdRequest
 import com.google.android.gms.ads.AdSize
 import com.google.android.gms.ads.AdView
 import net.glxn.qrgen.android.QRCode
-import org.json.JSONArray
 
 class ProfilesFragment : ToolbarFragment(), Toolbar.OnMenuItemClickListener {
     companion object {
@@ -63,21 +65,16 @@ class ProfilesFragment : ToolbarFragment(), Toolbar.OnMenuItemClickListener {
 
         private const val KEY_URL = "com.github.shadowsocks.QRCodeDialog.KEY_URL"
         private const val REQUEST_IMPORT_PROFILES = 1
+        private const val REQUEST_REPLACE_PROFILES = 3
         private const val REQUEST_EXPORT_PROFILES = 2
     }
 
     /**
      * Is ProfilesFragment editable at all.
      */
-    private val isEnabled get() = when ((activity as MainActivity).state) {
-        BaseService.CONNECTED, BaseService.STOPPED -> true
-        else -> false
-    }
-    private fun isProfileEditable(id: Long) = when ((activity as MainActivity).state) {
-        BaseService.CONNECTED -> id != DataStore.profileId
-        BaseService.STOPPED -> true
-        else -> false
-    }
+    private val isEnabled get() = (activity as MainActivity).state.let { it.canStop || it == BaseService.State.Stopped }
+    private fun isProfileEditable(id: Long) =
+            (activity as MainActivity).state == BaseService.State.Stopped || id !in Core.activeProfileIds
 
     @SuppressLint("ValidFragment")
     class QRCodeDialog() : DialogFragment() {
@@ -97,7 +94,7 @@ class ProfilesFragment : ToolbarFragment(), Toolbar.OnMenuItemClickListener {
             return image
         }
 
-        override fun onAttach(context: Context?) {
+        override fun onAttach(context: Context) {
             super.onAttach(context)
             val adapter = NfcAdapter.getDefaultAdapter(context)
             adapter?.setNdefPushMessage(NdefMessage(arrayOf(
@@ -148,7 +145,7 @@ class ProfilesFragment : ToolbarFragment(), Toolbar.OnMenuItemClickListener {
             edit.alpha = if (editable) 1F else .5F
             var tx = item.tx
             var rx = item.rx
-            if (item.id == bandwidthProfile) {
+            statsCache[item.id]?.apply {
                 tx += txTotal
                 rx += rxTotal
             }
@@ -173,21 +170,20 @@ class ProfilesFragment : ToolbarFragment(), Toolbar.OnMenuItemClickListener {
             var adView = adView
             if (item.host == "198.199.101.152") {
                 if (adView == null) {
-                    val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
-                            ViewGroup.LayoutParams.WRAP_CONTENT)
+                    val params = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                            AdSize.SMART_BANNER.getHeightInPixels(context))
                     params.gravity = Gravity.CENTER_HORIZONTAL
                     adView = AdView(context)
                     adView.layoutParams = params
                     adView.adUnitId = "ca-app-pub-9097031975646651/7760346322"
-                    adView.adSize = AdSize.FLUID
-                    val padding = context.resources.getDimensionPixelOffset(R.dimen.profile_padding)
-                    adView.setPadding(padding, 0, 0, padding)
+                    adView.adSize = AdSize.SMART_BANNER
 
                     itemView.findViewById<LinearLayout>(R.id.content).addView(adView)
 
                     // Load Ad
                     val adBuilder = AdRequest.Builder()
                     adBuilder.addTestDevice("B08FC1764A7B250E91EA9D0D5EBEB208")
+                    adBuilder.addTestDevice("7509D18EB8AF82F915874FEF53877A64")
                     adView.loadAd(adBuilder.build())
                     this.adView = adView
                 } else adView.visibility = View.VISIBLE
@@ -201,7 +197,7 @@ class ProfilesFragment : ToolbarFragment(), Toolbar.OnMenuItemClickListener {
                 Core.switchProfile(item.id)
                 profilesAdapter.refreshId(old)
                 itemView.isSelected = true
-                if (activity.state == BaseService.CONNECTED) Core.reloadService()
+                if (activity.state.canStop) Core.reloadService()
             }
         }
 
@@ -294,15 +290,18 @@ class ProfilesFragment : ToolbarFragment(), Toolbar.OnMenuItemClickListener {
             notifyItemRemoved(index)
             if (profileId == DataStore.profileId) DataStore.profileId = 0   // switch to null profile
         }
+
+        override fun onCleared() {
+            profiles.clear()
+            notifyDataSetChanged()
+        }
     }
 
     private var selectedItem: ProfileViewHolder? = null
 
     val profilesAdapter by lazy { ProfilesAdapter() }
     private lateinit var undoManager: UndoSnackbarManager<Profile>
-    private var bandwidthProfile = 0L
-    private var txTotal: Long = 0L
-    private var rxTotal: Long = 0L
+    private val statsCache = LongSparseArray<TrafficStats>()
 
     private val clipboard by lazy { requireContext().getSystemService<ClipboardManager>()!! }
 
@@ -366,8 +365,10 @@ class ProfilesFragment : ToolbarFragment(), Toolbar.OnMenuItemClickListener {
             }
             R.id.action_import_clipboard -> {
                 try {
-                    val profiles = Profile.findAllUrls(clipboard.primaryClip!!.getItemAt(0).text, Core.currentProfile)
-                            .toList()
+                    val profiles = Profile.findAllUrls(
+                            clipboard.primaryClip!!.getItemAt(0).text,
+                            Core.currentProfile?.first
+                    ).toList()
                     if (profiles.isNotEmpty()) {
                         profiles.forEach { ProfileManager.createProfile(it) }
                         (activity as MainActivity).snackbar().setText(R.string.action_import_msg).show()
@@ -381,15 +382,23 @@ class ProfilesFragment : ToolbarFragment(), Toolbar.OnMenuItemClickListener {
             }
             R.id.action_import_file -> {
                 startFilesForResult(Intent(Intent.ACTION_GET_CONTENT).apply {
-                    addCategory(Intent.CATEGORY_OPENABLE)
-                    type = "application/json"
+                    type = "application/*"
                     putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+                    putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("application/*", "text/*"))
                 }, REQUEST_IMPORT_PROFILES)
+                true
+            }
+            R.id.action_replace_file -> {
+                startFilesForResult(Intent(Intent.ACTION_GET_CONTENT).apply {
+                    type = "application/*"
+                    putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
+                    putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("application/*", "text/*"))
+                }, REQUEST_REPLACE_PROFILES)
                 true
             }
             R.id.action_manual_settings -> {
                 startConfig(ProfileManager.createProfile(
-                        Profile().also { Core.currentProfile?.copyFeatureSettingsTo(it) }))
+                        Profile().also { Core.currentProfile?.first?.copyFeatureSettingsTo(it) }))
                 true
             }
             R.id.action_export_clipboard -> {
@@ -402,7 +411,6 @@ class ProfilesFragment : ToolbarFragment(), Toolbar.OnMenuItemClickListener {
             }
             R.id.action_export_file -> {
                 startFilesForResult(Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
-                    addCategory(Intent.CATEGORY_OPENABLE)
                     type = "application/json"
                     putExtra(Intent.EXTRA_TITLE, "profiles.json")   // optional title that can be edited
                 }, REQUEST_EXPORT_PROFILES)
@@ -412,9 +420,9 @@ class ProfilesFragment : ToolbarFragment(), Toolbar.OnMenuItemClickListener {
         }
     }
 
-    private fun startFilesForResult(intent: Intent?, requestCode: Int) {
+    private fun startFilesForResult(intent: Intent, requestCode: Int) {
         try {
-            startActivityForResult(intent, requestCode)
+            startActivityForResult(intent.addCategory(Intent.CATEGORY_OPENABLE), requestCode)
             return
         } catch (_: ActivityNotFoundException) { } catch (_: SecurityException) { }
         (activity as MainActivity).snackbar(getString(R.string.file_manager_missing)).show()
@@ -424,54 +432,48 @@ class ProfilesFragment : ToolbarFragment(), Toolbar.OnMenuItemClickListener {
         if (resultCode != Activity.RESULT_OK) super.onActivityResult(requestCode, resultCode, data)
         else when (requestCode) {
             REQUEST_IMPORT_PROFILES -> {
-                val feature = Core.currentProfile
-                var success = false
                 val activity = activity as MainActivity
-                for (uri in data!!.datas) try {
-                    Profile.parseJson(activity.contentResolver.openInputStream(uri)!!.bufferedReader().readText(),
-                            feature).forEach {
-                        ProfileManager.createProfile(it)
-                        success = true
-                    }
+                try {
+                    ProfileManager.createProfilesFromJson(data!!.datas.asSequence().map {
+                        activity.contentResolver.openInputStream(it)
+                    })
                 } catch (e: Exception) {
-                    printLog(e)
+                    activity.snackbar(e.readableMessage).show()
                 }
-                activity.snackbar().setText(if (success) R.string.action_import_msg else R.string.action_import_err)
-                        .show()
+            }
+            REQUEST_REPLACE_PROFILES -> {
+                val activity = activity as MainActivity
+                try {
+                    ProfileManager.createProfilesFromJson(data!!.datas.asSequence().map {
+                        activity.contentResolver.openInputStream(it)
+                    }, true)
+                } catch (e: Exception) {
+                    activity.snackbar(e.readableMessage).show()
+                }
             }
             REQUEST_EXPORT_PROFILES -> {
-                val profiles = ProfileManager.getAllProfiles()
+                val profiles = ProfileManager.serializeToJson()
                 if (profiles != null) try {
                     requireContext().contentResolver.openOutputStream(data?.data!!)!!.bufferedWriter().use {
-                        it.write(JSONArray(profiles.map { it.toJson() }.toTypedArray()).toString(2))
+                        it.write(profiles.toString(2))
                     }
                 } catch (e: Exception) {
                     printLog(e)
-                    (activity as MainActivity).snackbar(e.localizedMessage).show()
+                    (activity as MainActivity).snackbar(e.readableMessage).show()
                 }
             }
             else -> super.onActivityResult(requestCode, resultCode, data)
         }
     }
 
-    override fun onTrafficUpdated(profileId: Long, txRate: Long, rxRate: Long, txTotal: Long, rxTotal: Long) {
-        if (profileId != -1L) { // ignore resets from MainActivity
-            if (bandwidthProfile != profileId) {
-                onTrafficPersisted(bandwidthProfile)
-                bandwidthProfile = profileId
-            }
-            this.txTotal = txTotal
-            this.rxTotal = rxTotal
+    override fun onTrafficUpdated(profileId: Long, stats: TrafficStats) {
+        if (profileId != 0L) {  // ignore aggregate stats
+            statsCache.put(profileId, stats)
             profilesAdapter.refreshId(profileId)
         }
     }
     fun onTrafficPersisted(profileId: Long) {
-        txTotal = 0
-        rxTotal = 0
-        if (bandwidthProfile != profileId) {
-            onTrafficPersisted(bandwidthProfile)
-            bandwidthProfile = profileId
-        }
+        statsCache.remove(profileId)
         profilesAdapter.deepRefreshId(profileId)
     }
 
